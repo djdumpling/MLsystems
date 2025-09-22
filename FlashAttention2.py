@@ -316,7 +316,7 @@ def _attn_bwd_dk_dv(
 
         if STAGE == 3: #augoregressive masking
             # mask = True for values that don't need masks
-            mask_block = (offs_q[None, :] > offs_kv[:, None]) # (BLOCK_KV1, BLOCK_Q1)
+            mask_block = (offs_q[None, :] >= offs_kv[:, None]) # (BLOCK_KV1, BLOCK_Q1)
             P_T_block = tl.where(mask_block, P_T_block, 0.0)
 
         dO_block = tl.load(dO_ptrs)
@@ -346,6 +346,21 @@ def _attn_bwd_dk_dv(
     # wrtie back dK
     dK_block_ptrs = dK + offs_kv[:, None] * stride_seq + offs_dim[None, :] * stride_dim
     tl.store(dK_block_ptrs, dK_block)
+
+@triton.autotone(
+    [
+        triton.Config(
+            {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+            num_stages = num_stages,
+            num_warps = num_warps # block of 32 threads running same instructions
+        )
+        for BLOCK_SIZE_Q in [64, 128]
+        for BLOCK_SIZE_KV in [32, 64]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4]
+    ],
+    key = ["SEQ_LEN", "HEAD_DIM"]
+)
 
 @triton.jit
 def _attn_bwd_dq(
@@ -619,6 +634,8 @@ class TritonAttention(torch.autograd.Function):
             num_stages = NUM_STAGES
         )
 
+        return dQ, dK, dV, None, None
+
 def test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal, dtype = torch.float16):
     Q = (
         torch.empty(
@@ -666,3 +683,8 @@ def test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal, dtype = torch.floa
     assert torch.allclose(ref_dK, tri_dK, atol = atol, rtol = rtol)
     assert torch.allclose(ref_dV, tri_dV, atol = atol, rtol = rtol)
     assert torch.allclose(ref_dQ, tri_dQ, atol = atol, rtol = rtol)
+
+if __name__ == "__main__":
+    test_op(BATCH_SIZE = 8, NUM_HEADS = 16, SEQ_LEN = 4096, HEAD_DIM = 64, causal = True)
+    test_op(BATCH_SIZE = 8, NUM_HEADS = 16, SEQ_LEN = 4096, HEAD_DIM = 64, causal = False)
+    print("PASSED")
